@@ -29,7 +29,7 @@ WEAPON_RANK = {"laser": 3, "lightning": 2, "mortar": 1, "gun": 0}
 
 
 class Bot:
-    name = "survivor-py"
+    name = "aggressor-py"
 
     def __init__(self, hello):
         self.cfg = hello["config"]
@@ -57,6 +57,7 @@ class Bot:
         self.look = None
         self.boosting = False
         self.last_move = (0.0, 0.0)
+        self.retreating = False
         self.last_yaw = 0.0
 
     # ------------------------------------------------------------------
@@ -106,10 +107,16 @@ class Bot:
         threats = [e for e in enemies if (e[2] and e[1] < 200) or e[1] < 50]
         avoid = False
         if threats:
-            en_hp = sum(e[0].get("hp", 1000) for e in threats)
+            strongest = max(e[0].get("hp", 1000) for e in threats)
             nearest = min(e[1] for e in threats)
-            engage = (len(threats) == 1 and me["hp"] >= 0.7 * en_hp) or (nearest < 35 and hpf > 0.3)
-            avoid = not engage
+            if self.retreating:
+                if hpf > 0.6 or strongest < me["hp"] * 0.8:
+                    self.retreating = False
+            elif hpf < 0.5 and strongest >= me["hp"]:
+                self.retreating = True
+            avoid = self.retreating and nearest >= 35
+        elif hpf > 0.6:
+            self.retreating = False
 
         # ---- loot goal ----
         goal = safe_pt
@@ -120,6 +127,24 @@ class Bot:
             if loot:
                 goal = loot[0]
                 goal_kind = loot[1]
+        if not urgent and not avoid:
+            if enemies:
+                tg = min(enemies, key=lambda e: e[1])
+                want_d = 25 if (("lightning" in wk) and ("laser" not in wk)) else (90 if ("laser" in wk or "mortar" in wk) else 60)
+                if tg[1] > want_d and not (loot and loot[1] == "pickup" and math.dist(loot[0], (px, py)) < 40):
+                    goal = (tg[0]["pos"][0], tg[0]["pos"][1])
+                    goal_kind = "hunt"
+            elif loot is None and t > 15:
+                snd = None
+                for sd in obs.get("sounds", []):
+                    if sd["kind"] in ("gun", "laser", "mortar", "explosion", "lightning") and (snd is None or sd["age"] < snd["age"]):
+                        snd = sd
+                if snd is not None:
+                    self.hunt_snd = (px + 55 * math.cos(snd["bearing"]), py + 55 * math.sin(snd["bearing"]), t + 4)
+                hs = getattr(self, "hunt_snd", None)
+                if hs and t < hs[2]:
+                    goal = (hs[0], hs[1])
+                    goal_kind = "hunt"
         # hold position if already safe and nothing to do
         holding = (goal_kind == "zone" and in_target)
 
@@ -233,12 +258,12 @@ class Bot:
                     fire[slot["gun"]] = True
             mode = "sec-" + kind
 
-        if avoid and threats and min(e[1] for e in threats) > 70:
+        if avoid and threats and min(e[1] for e in threats) > 110:
             fire = [False, False]
             if wobs.get("laser", {}).get("charge", 0) > 0:
                 fire = [slot["laser"] == 0, slot["laser"] == 1]  # already charging: let it fire
         # heal out of sight: regen is 45 HP/s after 5 s without combat
-        heal_hold = (hpf < 0.85 and not urgent and me["in_zone"] and not threats
+        heal_hold = (self.retreating and not urgent and me["in_zone"] and not threats
                      and t - self.last_hit_t > 0.5)
         if heal_hold:
             holding = True
@@ -256,7 +281,7 @@ class Bot:
                 self.strafe = self.rng.choice([-1, 1])
                 self.strafe_until = t + self.rng.uniform(0.8, 2.0)
             perp = (-dirn[1] * self.strafe, dirn[0] * self.strafe)
-            weak = hpf < 0.4 or len(close_threat) >= 3 or avoid
+            weak = avoid
             if weak:
                 flee_vec = (-dirn[0], -dirn[1])
                 cov = self.cover_for(obs, me, threats or close_threat, t)
@@ -272,8 +297,8 @@ class Bot:
                 rad = 0.0
                 if e[1] < want * 0.6:
                     rad = -0.7
-                elif e[1] > want * 1.4 and not urgent:
-                    rad = 0.0
+                elif e[1] > want * 1.2 and not urgent:
+                    rad = 0.8
                 strafe_vec = (perp[0] * 0.8 + dirn[0] * rad, perp[1] * 0.8 + dirn[1] * rad)
             blend = 0.5 if urgent else 1.0
             mv = (mv[0] * (0.6 if not weak else 0.25) + strafe_vec[0] * blend, mv[1] * (0.6 if not weak else 0.25) + strafe_vec[1] * blend)
