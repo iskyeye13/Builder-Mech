@@ -102,12 +102,20 @@ class Bot:
             enemies.append((m, d, los, c, sc))
         vis = [e for e in enemies if e[2] or e[1] < 45]
         flee_vec = None
+        hpf = me["hp"] / max(1.0, me["max_hp"])
+        threats = [e for e in enemies if (e[2] and e[1] < 200) or e[1] < 50]
+        avoid = False
+        if threats:
+            en_hp = sum(e[0].get("hp", 1000) for e in threats)
+            nearest = min(e[1] for e in threats)
+            engage = (len(threats) == 1 and me["hp"] >= 0.7 * en_hp) or (nearest < 35 and hpf > 0.3)
+            avoid = not engage
 
         # ---- loot goal ----
         goal = safe_pt
         goal_kind = "zone"
         loot = None
-        if not urgent:
+        if not urgent and not avoid and not (hpf < 0.5 and t - self.last_hit_t < 4):
             loot = self.pick_loot(obs, me, t, safe_pt, wk, enemies)
             if loot:
                 goal = loot[0]
@@ -225,6 +233,15 @@ class Bot:
                     fire[slot["gun"]] = True
             mode = "sec-" + kind
 
+        if avoid and threats and min(e[1] for e in threats) > 70:
+            fire = [False, False]
+            if wobs.get("laser", {}).get("charge", 0) > 0:
+                fire = [slot["laser"] == 0, slot["laser"] == 1]  # already charging: let it fire
+        # heal out of sight: regen is 45 HP/s after 5 s without combat
+        heal_hold = (hpf < 0.85 and not urgent and me["in_zone"] and not threats
+                     and t - self.last_hit_t > 0.5)
+        if heal_hold:
+            holding = True
         # ---- movement ----
         mv = self.navigate(obs, me, goal, t, holding, urgent)
         # combat modulation
@@ -239,10 +256,15 @@ class Bot:
                 self.strafe = self.rng.choice([-1, 1])
                 self.strafe_until = t + self.rng.uniform(0.8, 2.0)
             perp = (-dirn[1] * self.strafe, dirn[0] * self.strafe)
-            weak = hpf < 0.4 or len(close_threat) >= 3
+            weak = hpf < 0.4 or len(close_threat) >= 3 or avoid
             if weak:
                 flee_vec = (-dirn[0], -dirn[1])
-                strafe_vec = (perp[0] * 0.5 + flee_vec[0] * 0.9, perp[1] * 0.5 + flee_vec[1] * 0.9)
+                cov = self.cover_for(obs, me, threats or close_threat, t)
+                if cov is not None:
+                    cd = norm((cov[0] - px, cov[1] - py))
+                    strafe_vec = (cd[0] * 1.3 + perp[0] * 0.2, cd[1] * 1.3 + perp[1] * 0.2)
+                else:
+                    strafe_vec = (perp[0] * 0.5 + flee_vec[0] * 0.9, perp[1] * 0.5 + flee_vec[1] * 0.9)
             else:
                 want = 100 if (wobs.get("laser") or wobs.get("mortar")) else 70
                 if "lightning" in wobs and "laser" not in wobs:
@@ -321,11 +343,13 @@ class Bot:
 
         # events
         for ev in obs.get("events", []):
+            if ev.get("type") == "damaged":
+                mf.log(f"HIT t={t:.1f} hp={me['hp']:.0f} -{ev['amount']:.0f} {ev['weapon']} by={ev.get('by')} rear={ev.get('rear')} goal={goal_kind} avoid={avoid} heal={heal_hold} n_threat={len(threats)} zone={me['in_zone']}")
             if ev.get("type") == "effect" and ev.get("effect") == "short":
                 self.laser_short_until = t + 2.0
             if ev.get("type") == "take_failed":
                 self.bad_ids[ev["id"]] = t + 60
-        mf.draw.label(f"{goal_kind} {mode or ''} hp{me['hp']:.0f}")
+        mf.draw.label(f"{goal_kind} {mode or ''} {'AVOID' if avoid else ''}{' HEAL' if heal_hold else ''} hp{me['hp']:.0f}")
         mf.draw.point([goal[0], goal[1], pz], "#40c0ff", 6)
         el = (time.perf_counter() - t0) * 1000
         if el > 35:
@@ -335,6 +359,41 @@ class Bot:
     # ------------------------------------------------------------------
     def gkey(self, g):
         return (int(g[0] // 12), int(g[1] // 12))
+
+    def cover_for(self, obs, me, threats, t):
+        key = tuple(sorted(e[0]["id"] for e in threats))
+        c = getattr(self, "_cover", None)
+        px, py = me["pos"][0], me["pos"][1]
+        if c and c[0] == key and t - c[1] < 0.6 and math.hypot(c[2][0] - px, c[2][1] - py) > 3:
+            return c[2]
+        res = self.find_cover(obs, px, py, threats)
+        self._cover = (key, t, res) if res else None
+        return res
+
+    def find_cover(self, obs, px, py, threats):
+        nav = self.nav
+        if not nav.ok:
+            return None
+        z = obs["zone"]
+        best, bs = None, 1e9
+        for r in (10, 18, 28, 40):
+            for k in range(16):
+                a = k * TAU / 16
+                x, y = px + r * math.cos(a), py + r * math.sin(a)
+                if nav.blk[nav.cell(x, y)] or not nav.walk_clear((px, py), (x, y)):
+                    continue
+                if math.hypot(x - z["next_center"][0], y - z["next_center"][1]) > max(z["next_radius"], z["radius"]) - 8:
+                    continue
+                gz = nav.ground(x, y) + 4.5
+                if any(nav.los((e[0]["pos"][0], e[0]["pos"][1], e[0]["pos"][2] + 8), (x, y, gz)) for e in threats):
+                    continue
+                dmin = min(math.hypot(x - e[0]["pos"][0], y - e[0]["pos"][1]) for e in threats)
+                sc = r + 0.6 * max(0.0, 70 - dmin)
+                if sc < bs:
+                    bs, best = sc, (x, y)
+            if best is not None:
+                break
+        return best
 
     def dir_to(self, o, p):
         dx, dy, dz = p[0] - o[0], p[1] - o[1], p[2] - o[2]
