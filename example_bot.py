@@ -59,6 +59,8 @@ class Bot:
         self.last_move = (0.0, 0.0)
         self.retreating = False
         self.last_yaw = 0.0
+        self.target_id = None
+        self.target_lock_until = 0.0
 
     # ------------------------------------------------------------------
     def ground(self, x, y):
@@ -150,12 +152,81 @@ class Bot:
 
         # ---- target selection ----
         target = None
+
         if enemies:
             def score(e):
                 m, d, los, c, sc = e
-                hpf = m.get("hp", 1000) / max(1.0, m.get("max_hp", 1400))
-                return d * (0.6 + 0.6 * hpf) + (0 if los else 120)
-            target = min(enemies, key=score)
+                enemy_hp = m.get("hp", 1000)
+                enemy_max = max(1.0, m.get("max_hp", 1400))
+                hp_ratio = enemy_hp / enemy_max
+
+                # Prefer nearby enemies, but strongly favor weakened targets.
+                value = d * 0.75
+                value += hp_ratio * 65
+                value -= (1.0 - hp_ratio) * 55
+
+                # Visible enemies are substantially better targets.
+                if not los:
+                    value += 100
+
+                # Don't chase extremely distant enemies.
+                if d > 180:
+                    value += (d - 180) * 1.5
+
+                return value
+
+            best_target = min(enemies, key=score)
+
+            # Keep attacking the same opponent briefly instead of
+            # switching targets every time another mech moves closer.
+            current_target = None
+            if self.target_id is not None:
+                for e in enemies:
+                    if e[0].get("id") == self.target_id:
+                        current_target = e
+                        break
+
+            if current_target is not None:
+                if (t < self.target_lock_until
+                        and (not best_target[2] or score(best_target) > score(current_target) - 45)):
+                    target = current_target
+                else:
+                    target = best_target
+            else:
+                target = best_target
+
+            if target is not None:
+                new_id = target[0].get("id")
+                if new_id != self.target_id:
+                    self.target_id = new_id
+                    self.target_lock_until = t + 1.5
+
+
+        # Keep movement and aiming focused on the same opponent.
+        if target is not None and not urgent and not avoid:
+            target_distance = target[1]
+
+            desired_range = 25 if (
+                "lightning" in wk and "laser" not in wk
+            ) else (
+                90 if "laser" in wk or "mortar" in wk else 60
+            )
+
+            if target_distance > desired_range + 15:
+                # Don't abandon a nearby pickup just to chase someone.
+                protect_loot = (
+                    loot is not None
+                    and loot[1] == "pickup"
+                    and math.dist(loot[0], (px, py)) < 40
+                )
+
+                if not protect_loot:
+                    goal = (
+                        target[0]["pos"][0],
+                        target[0]["pos"][1]
+                    )
+                    goal_kind = "hunt"
+
         # secondary targets
         sec = None  # (pos, kind)
         if not target or (not target[2] and target[1] > 60):
@@ -279,7 +350,7 @@ class Bot:
             dirn = norm((ex, ey))
             if t > self.strafe_until:
                 self.strafe = self.rng.choice([-1, 1])
-                self.strafe_until = t + self.rng.uniform(0.8, 2.0)
+                self.strafe_until = t + self.rng.uniform(2.0, 3.5)
             perp = (-dirn[1] * self.strafe, dirn[0] * self.strafe)
             weak = avoid
             if weak:
@@ -299,7 +370,10 @@ class Bot:
                     rad = -0.7
                 elif e[1] > want * 1.2 and not urgent:
                     rad = 0.8
-                strafe_vec = (perp[0] * 0.8 + dirn[0] * rad, perp[1] * 0.8 + dirn[1] * rad)
+                strafe_vec = (
+                    perp[0] * 1.0 + dirn[0] * rad,
+                    perp[1] * 1.0 + dirn[1] * rad
+                )
             blend = 0.5 if urgent else 1.0
             mv = (mv[0] * (0.6 if not weak else 0.25) + strafe_vec[0] * blend, mv[1] * (0.6 if not weak else 0.25) + strafe_vec[1] * blend)
         # dodging
@@ -529,7 +603,9 @@ class Bot:
                 continue
             if kind in wk:
                 continue
-            rank = WEAPON_RANK[kind]
+            rank = WEAPON_RANK.get(kind, -1)
+            if rank < 0:
+                continue
             if have2 and rank <= best_rank:
                 continue
             if pos[2] - self.ground(pos[0], pos[1]) > 3:
@@ -587,7 +663,9 @@ class Bot:
             d = math.hypot(p["pos"][0] - px, p["pos"][1] - py)
             if d > 3.6 or abs(p["pos"][2] - pz) > 3.5:
                 continue
-            rank = WEAPON_RANK[p["kind"]]
+            rank = WEAPON_RANK.get(p["kind"], -1)
+            if rank < 0:
+                continue
             if wk[1] is None:
                 cand = (rank, p["id"], None)
             else:
