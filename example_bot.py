@@ -101,7 +101,7 @@ class Bot:
             d = math.dist(m["pos"][:2], (px, py))
             los = self.nav.los(eye, c)
             enemies.append((m, d, los, c, sc))
-        vis = [e for e in enemies if e[2] or e[1] < 45]
+        vis = [e for e in enemies if e[2] or e[1] < 55]
         flee_vec = None
         hpf = me["hp"] / max(1.0, me["max_hp"])
         threats = [e for e in enemies if (e[2] and e[1] < 200) or e[1] < 45]
