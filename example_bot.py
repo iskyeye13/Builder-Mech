@@ -104,7 +104,7 @@ class Bot:
         vis = [e for e in enemies if e[2] or e[1] < 45]
         flee_vec = None
         hpf = me["hp"] / max(1.0, me["max_hp"])
-        threats = [e for e in enemies if (e[2] and e[1] < 200) or e[1] < 40]
+        threats = [e for e in enemies if (e[2] and e[1] < 200) or e[1] < 45]
         avoid = False
         if threats:
             strongest = max(e[0].get("hp", 1000) for e in threats)
